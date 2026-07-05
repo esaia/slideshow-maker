@@ -85,9 +85,7 @@ class ProjectController extends Controller
         }
 
         $project->update(['status' => 'preparing', 'error' => null]);
-        foreach (['ingest', 'proxies'] as $name) {
-            $project->step($name)->update(['status' => 'pending', 'progress' => 0, 'log' => null]);
-        }
+        $project->step('ingest')->update(['status' => 'pending', 'progress' => 0, 'log' => null]);
 
         AddSourceVideos::dispatch($project);
 
@@ -107,11 +105,20 @@ class ProjectController extends Controller
         return response()->json($this->payload($project));
     }
 
-    /** Stream the 480p proxy for the trim player (supports seeking via Range). */
-    public function proxy(Project $project, SourceVideo $video)
+    /**
+     * Stream the 480p proxy for the trim player (supports seeking via Range).
+     * Built lazily on first request — only the video the user is actually
+     * looking at gets transcoded, instead of the whole project upfront.
+     */
+    public function proxy(Project $project, SourceVideo $video, \App\Services\Ffmpeg $ffmpeg)
     {
         abort_unless($video->project_id === $project->id, 404);
-        abort_unless($video->proxy_path && is_file($video->proxy_path), 404);
+
+        if (! $video->proxy_path || ! is_file($video->proxy_path)) {
+            $proxy = $project->storagePath("proxies/{$video->id}.mp4");
+            $ffmpeg->makeProxy($video->path, $proxy);
+            $video->update(['proxy_path' => $proxy, 'status' => 'proxied']);
+        }
 
         return response()->file($video->proxy_path, ['Content-Type' => 'video/mp4']);
     }
@@ -141,6 +148,7 @@ class ProjectController extends Controller
         $data = $request->validate([
             'start_s' => ['required', 'numeric', 'min:0'],
             'end_s' => ['required', 'numeric', 'gt:start_s'],
+            'keep_audio' => ['sometimes', 'boolean'],
         ]);
 
         if ($data['end_s'] - $data['start_s'] < 0.8) {
@@ -162,6 +170,7 @@ class ProjectController extends Controller
         $data = $request->validate([
             'start_s' => ['required', 'numeric', 'min:0'],
             'end_s' => ['required', 'numeric', 'gt:start_s'],
+            'keep_audio' => ['sometimes', 'boolean'],
         ]);
 
         if ($data['end_s'] - $data['start_s'] < 0.8) {
@@ -286,6 +295,7 @@ class ProjectController extends Controller
                     'video' => basename($s->sourceVideo->path),
                     'start_s' => (float) $s->start_s,
                     'end_s' => (float) $s->end_s,
+                    'keep_audio' => (bool) $s->keep_audio,
                     'used_in_render' => $s->used_in_render,
                 ]),
             'outputs' => collect(array_keys(config('slideshow.outputs')))

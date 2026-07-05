@@ -32,7 +32,6 @@ class RunPipeline implements ShouldQueue
 
         try {
             $this->ingest($project, $ffmpeg);
-            $this->makeProxies($project, $ffmpeg);
             $this->analyzeMusic($analyzer);
 
             $project->update(['status' => 'ready']);

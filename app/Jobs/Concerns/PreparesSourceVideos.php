@@ -7,7 +7,10 @@ use App\Services\Ffmpeg;
 
 /**
  * Shared by RunPipeline (new project) and AddSourceVideos (adding clips to an
- * existing one): probe metadata, order by capture time, build 480p proxies.
+ * existing one): probe metadata and order the timeline by capture time.
+ * Preview proxies are *not* built here — they're generated lazily per-video
+ * on first playback (see ProjectController::proxy) so adding clips, even in
+ * bulk, stays cheap.
  */
 trait PreparesSourceVideos
 {
@@ -29,25 +32,6 @@ trait PreparesSourceVideos
             ->orderByRaw('shot_at IS NULL, shot_at, id')
             ->get()
             ->each(fn ($video, $i) => $video->update(['sort_order' => $i]));
-
-        $step->finish();
-    }
-
-    private function makeProxies(Project $project, Ffmpeg $ffmpeg): void
-    {
-        $step = $project->step('proxies');
-        $step->start();
-
-        $videos = $project->sourceVideos()->get();
-        foreach ($videos as $i => $video) {
-            $proxy = $project->storagePath("proxies/{$video->id}.mp4");
-            // resume support: keep proxies finished on a previous attempt
-            if ($video->status !== 'proxied' || ! is_file($proxy)) {
-                $ffmpeg->makeProxy($video->path, $proxy);
-                $video->update(['proxy_path' => $proxy, 'status' => 'proxied']);
-            }
-            $step->tick((int) (($i + 1) / $videos->count() * 100), basename($video->path));
-        }
 
         $step->finish();
     }

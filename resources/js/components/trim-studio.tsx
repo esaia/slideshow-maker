@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FileBrowser from '@/components/file-browser';
 import { fmtTime, type ProjectData, type SegmentData } from '@/pages/projects/types';
 
-type Range = { in: number; out: number };
+// `out` is null while a clip's start is marked but its end isn't yet —
+// pressing "I" no longer invents a default end, only "O" sets one.
+type Range = { in: number; out: number | null };
 
 const MIN_RANGE_S = 0.8;
 
@@ -25,6 +27,8 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
     const [currentTime, setCurrentTime] = useState(0);
     const [range, setRange] = useState<Range | null>(null);
     const [editingClipId, setEditingClipId] = useState<number | null>(null);
+    const [keepAudio, setKeepAudio] = useState(false);
+    const [previewLoading, setPreviewLoading] = useState(!video?.has_proxy);
 
     const clipsHere = project.segments.filter((s) => s.video_id === video?.id);
     const totalSelected = useMemo(
@@ -38,7 +42,9 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
         setCurrentTime(0);
         setRange(null);
         setEditingClipId(null);
-    }, [idx, video?.duration]);
+        setKeepAudio(false);
+        setPreviewLoading(!video?.has_proxy);
+    }, [idx, video?.duration, video?.has_proxy]);
 
     function go(delta: number) {
         setIdx((i) => Math.min(videos.length - 1, Math.max(0, i + delta)));
@@ -50,10 +56,9 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
             const target = e.target as HTMLElement | null;
             if (
                 target &&
-                (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'VIDEO'].includes(target.tagName) ||
-                    target.isContentEditable)
+                (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)
             ) {
-                return; // let native controls / focused elements handle keys
+                return; // let text entry keep the space/keystrokes — buttons don't need to
             }
             if (gridView || musicPicker) return;
 
@@ -69,22 +74,32 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                 return;
             }
 
+            if (key === 'arrowleft' || key === 'arrowright') {
+                e.preventDefault();
+                const delta = key === 'arrowleft' ? -1 : 1;
+                setIdx((i) => Math.min(videos.length - 1, Math.max(0, i + delta)));
+                return;
+            }
+
             if (key !== 'i' && key !== 'o') return;
             e.preventDefault();
 
             const t = videoRef.current?.currentTime ?? 0;
             setRange((prev) => {
                 if (key === 'i') {
-                    const out = prev && prev.out > t + MIN_RANGE_S ? prev.out : Math.min(duration, t + MIN_RANGE_S);
-                    return { in: Math.min(t, out - MIN_RANGE_S), out };
+                    // marks the start only — keep an existing end if it's still valid,
+                    // otherwise leave it unset until "O" is pressed
+                    const out = prev && prev.out !== null && prev.out > t + MIN_RANGE_S ? prev.out : null;
+                    return { in: t, out };
                 }
-                const inPoint = prev && prev.in < t - MIN_RANGE_S ? prev.in : Math.max(0, t - MIN_RANGE_S);
-                return { in: inPoint, out: Math.max(t, inPoint + MIN_RANGE_S) };
+                // "O" needs a start already marked; otherwise there's nothing to end
+                if (!prev) return prev;
+                return { in: prev.in, out: Math.max(t, prev.in + MIN_RANGE_S) };
             });
         }
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [duration, gridView, musicPicker]);
+    }, [duration, gridView, musicPicker, videos.length]);
 
     function seek(t: number) {
         const el = videoRef.current;
@@ -95,28 +110,30 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
     function selectClip(clip: SegmentData) {
         setEditingClipId(clip.id);
         setRange({ in: clip.start_s, out: clip.end_s });
+        setKeepAudio(clip.keep_audio);
         preview(clip.start_s, clip.end_s); // clicking a clip plays it right away
     }
 
     function deselectClip() {
         setEditingClipId(null);
         setRange(null);
+        setKeepAudio(false);
     }
 
     function addClip() {
-        if (!range || range.out - range.in < MIN_RANGE_S) return;
+        if (!range || range.out === null || range.out - range.in < MIN_RANGE_S) return;
         router.post(
             `/projects/${project.id}/videos/${video.id}/segments`,
-            { start_s: Math.round(range.in * 1000) / 1000, end_s: Math.round(range.out * 1000) / 1000 },
+            { start_s: Math.round(range.in * 1000) / 1000, end_s: Math.round(range.out * 1000) / 1000, keep_audio: keepAudio },
             { preserveScroll: true, preserveState: true, onSuccess: () => setRange(null) },
         );
     }
 
     function saveClip() {
-        if (editingClipId === null || !range || range.out - range.in < MIN_RANGE_S) return;
+        if (editingClipId === null || !range || range.out === null || range.out - range.in < MIN_RANGE_S) return;
         router.patch(
             `/projects/${project.id}/segments/${editingClipId}`,
-            { start_s: Math.round(range.in * 1000) / 1000, end_s: Math.round(range.out * 1000) / 1000 },
+            { start_s: Math.round(range.in * 1000) / 1000, end_s: Math.round(range.out * 1000) / 1000, keep_audio: keepAudio },
             {
                 preserveScroll: true,
                 preserveState: true,
@@ -125,6 +142,14 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                     setRange(null);
                 },
             },
+        );
+    }
+
+    function toggleClipAudio(clip: SegmentData) {
+        router.patch(
+            `/projects/${project.id}/segments/${clip.id}`,
+            { start_s: clip.start_s, end_s: clip.end_s, keep_audio: !clip.keep_audio },
+            { preserveScroll: true, preserveState: true },
         );
     }
 
@@ -281,19 +306,27 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
             </div>
 
             {/* player */}
-            <video
-                ref={videoRef}
-                key={video.id}
-                controls
-                preload="metadata"
-                src={`/projects/${project.id}/videos/${video.id}/proxy`}
-                className="max-h-[46vh] w-full rounded-lg bg-black"
-                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                onLoadedMetadata={(e) => {
-                    const d = e.currentTarget.duration;
-                    if (Number.isFinite(d) && d > 0) setDuration(d);
-                }}
-            />
+            <div className="relative">
+                <video
+                    ref={videoRef}
+                    key={video.id}
+                    preload="metadata"
+                    src={`/projects/${project.id}/videos/${video.id}/proxy`}
+                    className="max-h-[46vh] w-full rounded-lg bg-black"
+                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                    onLoadedMetadata={(e) => {
+                        const d = e.currentTarget.duration;
+                        if (Number.isFinite(d) && d > 0) setDuration(d);
+                        setPreviewLoading(false);
+                    }}
+                />
+                {previewLoading && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 rounded-lg bg-black/60 text-sm text-neutral-300">
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+                        Generating preview…
+                    </div>
+                )}
+            </div>
 
             {/* trim timeline */}
             <div className="rounded-lg border border-neutral-800 p-4">
@@ -304,14 +337,18 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                     clips={clipsHere.filter((c) => c.id !== editingClipId)}
                     onSeek={seek}
                     onSelectClip={selectClip}
-                    onPreviewRange={() => range && preview(range.in, range.out)}
+                    onPreviewRange={() => range && range.out !== null && preview(range.in, range.out)}
                     onChange={setRange}
                 />
                 <div className="mt-3 flex flex-wrap items-center gap-3">
-                    {range ? (
+                    {range && range.out !== null ? (
                         <span className="font-mono text-sm text-neutral-300">
                             {fmtTime(range.in)} → {fmtTime(range.out)}
                             <span className="ml-2 text-emerald-400">({(range.out - range.in).toFixed(1)}s)</span>
+                        </span>
+                    ) : range ? (
+                        <span className="font-mono text-sm text-neutral-300">
+                            {fmtTime(range.in)} → <span className="text-neutral-500">press O to set the end</span>
                         </span>
                     ) : (
                         <span className="text-sm text-neutral-500">
@@ -324,7 +361,12 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                     {range && (
                         <>
                             <button
-                                onClick={() => setRange({ in: Math.min(currentTime, range.out - MIN_RANGE_S), out: range.out })}
+                                onClick={() =>
+                                    setRange({
+                                        in: Math.min(currentTime, range.out !== null ? range.out - MIN_RANGE_S : Infinity),
+                                        out: range.out,
+                                    })
+                                }
                                 className="rounded bg-neutral-800 px-2.5 py-1 text-xs hover:bg-neutral-700"
                                 title="Set start to the playhead"
                             >
@@ -337,18 +379,31 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                             >
                                 end = playhead ⇥
                             </button>
+                            {range.out !== null && (
+                                <button
+                                    onClick={() => preview(range.in, range.out as number)}
+                                    className="rounded bg-neutral-800 px-2.5 py-1 text-xs hover:bg-neutral-700"
+                                >
+                                    ▶ Preview range
+                                </button>
+                            )}
                             <button
-                                onClick={() => preview(range.in, range.out)}
-                                className="rounded bg-neutral-800 px-2.5 py-1 text-xs hover:bg-neutral-700"
+                                onClick={() => setKeepAudio((v) => !v)}
+                                className={`rounded px-2.5 py-1 text-xs ${
+                                    keepAudio
+                                        ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                                        : 'bg-neutral-800 hover:bg-neutral-700'
+                                }`}
+                                title="Keep this clip's own sound — the music will duck under it"
                             >
-                                ▶ Preview range
+                                {keepAudio ? '🔊 Keep audio' : '🔇 Silent (music only)'}
                             </button>
                         </>
                     )}
                     {editingClipId === null ? (
                         <button
                             onClick={addClip}
-                            disabled={!range || range.out - range.in < MIN_RANGE_S}
+                            disabled={!range || range.out === null || range.out - range.in < MIN_RANGE_S}
                             className="ml-auto rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold hover:bg-emerald-500 disabled:opacity-40"
                         >
                             + Add clip
@@ -364,7 +419,7 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                             </button>
                             <button
                                 onClick={saveClip}
-                                disabled={!range || range.out - range.in < MIN_RANGE_S}
+                                disabled={!range || range.out === null || range.out - range.in < MIN_RANGE_S}
                                 className="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold hover:bg-sky-500 disabled:opacity-40"
                             >
                                 ✓ Save changes
@@ -399,6 +454,13 @@ export default function TrimStudio({ project }: { project: ProjectData }) {
                                     {fmtTime(clip.start_s)} → {fmtTime(clip.end_s)}
                                 </span>
                                 <span className="text-neutral-500">({(clip.end_s - clip.start_s).toFixed(1)}s)</span>
+                                <button
+                                    onClick={() => toggleClipAudio(clip)}
+                                    className={clip.keep_audio ? 'text-emerald-400 hover:text-emerald-300' : 'text-neutral-500 hover:text-neutral-300'}
+                                    title={clip.keep_audio ? "This clip's own sound plays (music ducks)" : 'Silent — click to keep this clip\'s sound'}
+                                >
+                                    {clip.keep_audio ? '🔊' : '🔇'}
+                                </button>
                                 <button
                                     onClick={() => selectClip(clip)}
                                     className="ml-auto text-sky-400 hover:text-sky-300"
@@ -545,7 +607,7 @@ function Timeline({
             if (drag.mode === 'create') {
                 onChange({ in: Math.min(drag.anchor, t), out: Math.max(drag.anchor, t) });
                 onSeek(t);
-            } else if (drag.mode === 'in' && range) {
+            } else if (drag.mode === 'in' && range && range.out !== null) {
                 const next = Math.max(0, Math.min(t, range.out - MIN_RANGE_S));
                 onChange({ in: next, out: range.out });
                 onSeek(next);
@@ -553,7 +615,7 @@ function Timeline({
                 const next = Math.min(duration, Math.max(t, range.in + MIN_RANGE_S));
                 onChange({ in: range.in, out: next });
                 onSeek(next);
-            } else if (drag.mode === 'move' && range) {
+            } else if (drag.mode === 'move' && range && range.out !== null) {
                 const len = range.out - range.in;
                 let nextIn = t - drag.anchor;
                 nextIn = Math.min(Math.max(0, nextIn), duration - len);
@@ -566,7 +628,7 @@ function Timeline({
             dragRef.current = null;
             if (!drag) return;
             // a create-drag that stayed tiny is just a click-to-seek
-            if (drag.mode === 'create' && drag.moved && range && range.out - range.in < MIN_RANGE_S) {
+            if (drag.mode === 'create' && drag.moved && range && range.out !== null && range.out - range.in < MIN_RANGE_S) {
                 onChange(null);
             }
             // a click on the range (no drag) plays it
@@ -606,7 +668,7 @@ function Timeline({
                 />
             ))}
 
-            {range && (
+            {range && range.out !== null && (
                 <>
                     {/* active range — drag middle to move */}
                     <div
@@ -642,6 +704,14 @@ function Timeline({
                         <div className="mx-auto h-full w-1.5 rounded bg-emerald-400" />
                     </div>
                 </>
+            )}
+
+            {/* start marked, waiting on an end — just a marker, nothing to drag yet */}
+            {range && range.out === null && (
+                <div
+                    className="pointer-events-none absolute top-0 z-10 h-full w-0.5 bg-emerald-400"
+                    style={{ left: `${pct(range.in)}%` }}
+                />
             )}
 
             {/* playhead */}

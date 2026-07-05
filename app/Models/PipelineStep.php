@@ -9,9 +9,9 @@ class PipelineStep extends Model
 {
     protected $guarded = [];
 
-    public const PREPARE = ['ingest', 'proxies', 'music'];
+    public const PREPARE = ['ingest', 'music'];
 
-    public const NAMES = ['ingest', 'proxies', 'music', 'plan', 'render'];
+    public const NAMES = ['ingest', 'music', 'plan', 'render'];
 
     public function project(): BelongsTo
     {

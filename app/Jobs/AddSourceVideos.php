@@ -10,10 +10,10 @@ use Illuminate\Foundation\Queue\Queueable;
 use Throwable;
 
 /**
- * Extends an already-prepared project with newly added clips: probes and
- * proxies just the new videos (existing ones are skipped, see
- * PreparesSourceVideos::makeProxies), then drops the project back to "ready"
- * without touching the music analysis.
+ * Extends an already-prepared project with newly added clips: probes the new
+ * videos and re-sorts the timeline by capture time, then drops the project
+ * back to "ready". Preview proxies are generated lazily per-video (see
+ * ProjectController::proxy), so this is cheap even for large batches.
  */
 class AddSourceVideos implements ShouldQueue
 {
@@ -32,7 +32,6 @@ class AddSourceVideos implements ShouldQueue
 
         try {
             $this->ingest($project, $ffmpeg);
-            $this->makeProxies($project, $ffmpeg);
 
             $project->update(['status' => 'ready']);
         } catch (Throwable $e) {

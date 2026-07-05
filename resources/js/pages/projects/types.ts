@@ -11,6 +11,7 @@ export interface SegmentData {
     video: string;
     start_s: number;
     end_s: number;
+    keep_audio: boolean;
     used_in_render: boolean;
 }
 
@@ -40,7 +41,6 @@ export interface ProjectData {
 
 export const STEP_LABELS: Record<string, string> = {
     ingest: 'Reading video metadata',
-    proxies: 'Creating preview videos',
     music: 'Analyzing music beats',
     plan: 'Planning the edit',
     render: 'Rendering the video',

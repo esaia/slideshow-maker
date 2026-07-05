@@ -13,6 +13,10 @@ use App\Models\Segment;
  * range is treated as "best material to pull from", not a duration: whatever
  * fits before the next accent is shown, the rest is skipped. Clips play in
  * shooting order, each used once; the montage ends when the clips run out.
+ *
+ * Exception: clips marked "keep_audio" (the user wants to actually hear them)
+ * play their full marked range instead — cutting a clip mid-sentence for the
+ * beat would defeat the point of keeping its audio.
  */
 class EditPlanner
 {
@@ -29,7 +33,7 @@ class EditPlanner
     private const TARGET_CLIP_S = 3.0;
 
     /**
-     * @return array<int, array{segment_id: int, path: string, in: float, duration: float}>
+     * @return array<int, array{segment_id: int, path: string, in: float, duration: float, start: float, keep_audio: bool}>
      */
     public function plan(Project $project): array
     {
@@ -57,10 +61,9 @@ class EditPlanner
                 break; // music is full — remaining clips don't fit
             }
 
-            $duration = min(
-                $this->nextCutLength($beats, $strongBeats, $cursor),
-                $musicDuration - $cursor,
-            );
+            $duration = $segment->keep_audio
+                ? min((float) $segment->end_s - (float) $segment->start_s, $musicDuration - $cursor)
+                : min($this->nextCutLength($beats, $strongBeats, $cursor), $musicDuration - $cursor);
 
             // fit the beat-aligned duration inside the source material,
             // anchored at the user's start mark and shifted back if needed
@@ -82,6 +85,8 @@ class EditPlanner
                 'path' => $segment->sourceVideo->path,
                 'in' => round($in, 3),
                 'duration' => round($duration, 3),
+                'start' => round($cursor, 3),
+                'keep_audio' => (bool) $segment->keep_audio,
             ];
             $cursor += $duration;
         }
